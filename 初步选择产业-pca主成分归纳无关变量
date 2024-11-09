@@ -1,0 +1,144 @@
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import RidgeCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+import matplotlib.pyplot as plt
+import seaborn as sns
+import docx
+import openpyxl
+
+# Load data from the provided information
+data = {
+    "city": ["SHENZHEN"] * 9,
+    "YEAR": [2022, 2021, 2020, 2019, 2018, 2017, 2016, 2015, 2014],
+    "O3": [88.42, 85.25, 79.92, 93.83, 82.42, 86.67, 85.42, 80.33, 75.58],
+    "Temperature": [23.2, 23.9, 23.2, 23.6, 23.4, 24.0, 23.8, 24.0, 23.2],
+    "Humidity": [73, 72, 79, 77, 76, 78, 76, 74, 76],
+    "Secondary_Industry": [201423166, 191885622, 173527733, 165647501, 152476035, 139231789, 123533619, 107422186, 95574258],
+    "Tertiary_Industry": [123136334, 116077958, 103806547, 104019993, 99958664, 93375209, 83240899, 76874089, 72321670],
+    "Epidemic": [0, 1, 1, 1, 0, 0, 0, 0, 0]
+}
+
+# Create DataFrame
+df = pd.DataFrame(data)
+
+# Step 1: Normalization and Regularization
+# Separate features and target
+X = df[["Temperature", "Humidity", "Secondary_Industry", "Tertiary_Industry", "Epidemic"]]
+y = df["O3"]
+
+# Normalizing the features
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Step 2: Collinearity Diagnosis using VIF
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+# Calculate VIF
+vif_data = pd.DataFrame()
+vif_data["Feature"] = X.columns
+vif_data["VIF"] = [variance_inflation_factor(X_scaled, i) for i in range(X_scaled.shape[1])]
+
+# Step 3: Reduce Collinearity using PCA for non-target features (except Secondary and Tertiary Industry)
+# Select columns for PCA
+X_for_pca = X_scaled[:, [0, 1, 4]]  # Temperature, Humidity, Epidemic
+pca = PCA(n_components=1)
+X_pca = pca.fit_transform(X_for_pca)
+
+# Combine PCA components with Secondary and Tertiary Industry
+X_reduced = np.hstack((X_pca, X_scaled[:, [2, 3]]))
+
+# Step 4: Ridge Regression with Cross-Validation
+# Split the data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X_reduced, y, test_size=0.2, random_state=42)
+
+# Ridge Regression with Cross-Validation
+ridge_cv = RidgeCV(alphas=[0.1, 1.0, 10.0])
+ridge_cv.fit(X_train, y_train)
+
+# Get the best alpha value and refit the model
+best_alpha = ridge_cv.alpha_
+ridge_best = RidgeCV(alphas=[best_alpha])
+ridge_best.fit(X_train, y_train)
+
+# Coefficients from Ridge Regression
+coefficients = ridge_best.coef_
+intercept = ridge_best.intercept_
+
+# Step 5: Calculate the correlation coefficients
+correlation_secondary_industry = np.corrcoef(df["Secondary_Industry"], df["O3"])[0, 1]
+correlation_tertiary_industry = np.corrcoef(df["Tertiary_Industry"], df["O3"])[0, 1]
+
+# Step 6: Visualization of Correlations
+# Exclude non-numeric columns for correlation matrix
+corr_matrix = df.select_dtypes(include=[np.number]).corr()
+plt.figure(figsize=(10, 8))
+sns.heatmap(corr_matrix, annot=True, cmap="coolwarm", linewidths=0.5)
+plt.title("Correlation Matrix")
+plt.savefig("D:/7019/report/1/correlation_matrix.png")
+plt.show()
+
+# Step 7: Final Regression Equation
+regression_equation = f"O3 = {intercept:.2f} + {coefficients[0]:.2f} * PCA_Component + {coefficients[1]:.2e} * Secondary_Industry + {coefficients[2]:.2e} * Tertiary_Industry"
+
+# Step 8: Save Results in Word and Excel
+# Create a Word document
+doc = docx.Document()
+doc.add_heading('Ridge Regression Analysis Report', 0)
+
+doc.add_heading('1. Data Import and Preprocessing', level=1)
+doc.add_paragraph('The initial dataset was imported and preprocessed. Features were normalized using StandardScaler to ensure uniform scaling, and a Principal Component Analysis (PCA) was applied to reduce collinearity in Temperature, Humidity, and Epidemic features.')
+
+doc.add_heading('2. Collinearity Diagnosis', level=1)
+doc.add_paragraph('Variance Inflation Factor (VIF) was calculated to diagnose collinearity. Secondary and Tertiary Industries had high VIF values, indicating multicollinearity issues. PCA was used to address this.')
+
+# Add VIF Table
+table = doc.add_table(rows=1, cols=len(vif_data.columns))
+hdr_cells = table.rows[0].cells
+for i, col_name in enumerate(vif_data.columns):
+    hdr_cells[i].text = col_name
+for index, row in vif_data.iterrows():
+    row_cells = table.add_row().cells
+    for i, value in enumerate(row):
+        row_cells[i].text = str(value)
+
+doc.add_heading('3. Ridge Regression Results', level=1)
+doc.add_paragraph(f'Best alpha value for Ridge Regression: {best_alpha}')
+doc.add_paragraph(f'Final Regression Equation: {regression_equation}')
+
+# Add interpretation of the regression equation
+doc.add_paragraph('The regression equation represents the relationship between the target variable (O3 concentration) and the predictor variables. The intercept value represents the expected O3 concentration when all predictors are zero. Each coefficient represents the change in O3 concentration for a one-unit increase in the respective predictor, holding all other variables constant. Specifically:')
+doc.add_paragraph(f'1. The PCA Component has a coefficient of {coefficients[0]:.2f}, which means it contributes negatively to the O3 concentration. A one-unit increase in the PCA component is associated with a decrease in O3 by approximately {abs(coefficients[0]):.2f} units.')
+doc.add_paragraph(f'2. The coefficient for Secondary Industry is {coefficients[1]:.2e}, indicating that an increase in economic activity in the secondary sector has a positive impact on O3 concentration. This suggests that as secondary industry output increases, O3 levels are expected to rise.')
+doc.add_paragraph(f'3. The coefficient for Tertiary Industry is {coefficients[2]:.2e}, which also suggests a positive relationship with O3 concentration. An increase in tertiary industry activity is expected to lead to an increase in O3 concentration, though the exact magnitude is dependent on the scale of economic activity.')
+
+doc.add_heading('4. Correlation Analysis', level=1)
+doc.add_paragraph(f'Correlation between Secondary Industry and O3: {correlation_secondary_industry}')
+doc.add_paragraph(f'Correlation between Tertiary Industry and O3: {correlation_tertiary_industry}')
+doc.add_picture('correlation_matrix.png', width=docx.shared.Inches(5))
+
+# Save Word Document
+doc.save('D:/7019/report/1/ridge_regression_report.docx')
+
+# Create an Excel workbook
+wb = openpyxl.Workbook()
+sheet = wb.active
+sheet.title = "VIF Data"
+
+# Add headers and data to Excel
+for i, col_name in enumerate(vif_data.columns, start=1):
+    sheet.cell(row=1, column=i, value=col_name)
+for index, row in enumerate(vif_data.values, start=2):
+    for i, value in enumerate(row, start=1):
+        sheet.cell(row=index, column=i, value=value)
+
+# Save Excel Workbook
+wb.save('D:/7019/report/1/vif_data.xlsx')
+
+# Display final messages
+print("Word document 'ridge_regression_report.docx' has been created.")
+print("Excel workbook 'vif_data.xlsx' has been created.")
+print("All outputs including the correlation matrix, regression equation, and VIF data have been documented.")
