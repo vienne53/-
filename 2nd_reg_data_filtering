@@ -1,0 +1,200 @@
+import pandas as pd
+import statsmodels.api as sm
+from linearmodels.panel import PanelOLS, RandomEffects
+from linearmodels.panel import compare
+from sklearn.preprocessing import StandardScaler
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+from sklearn.feature_selection import SequentialFeatureSelector
+from sklearn.linear_model import Ridge
+import numpy as np
+import os
+from statsmodels.formula.api import ols
+import openpyxl
+from docx import Document
+from openpyxl import Workbook
+from scipy.stats import pearsonr
+
+# Step 1: Load the dataset
+file_path = r'D:\7019\report\2\2nd-panel reg.xlsx'
+try:
+    data = pd.read_excel(file_path, sheet_name=None)
+    sheet_info = {}
+    for sheet_name, df in data.items():
+        sheet_info[sheet_name] = df.head()
+        print(f"Sheet: {sheet_name}")
+        print(df.head())
+except Exception as e:
+    print("Error loading the Excel file:", e)
+
+# Create a Word document to store all steps and results
+doc = Document()
+doc.add_heading('Data Analysis Report', level=1)
+
+# Step 1: Load the dataset
+doc.add_heading('Step 1: Load the Dataset', level=2)
+doc.add_paragraph('The dataset is loaded from the provided Excel file. The dataset contains various features for analysis, and the first few rows from each sheet are displayed below.')
+for sheet_name, df in sheet_info.items():
+    doc.add_heading(f'Sheet: {sheet_name}', level=3)
+    doc.add_paragraph(df.to_string())
+
+# Use the first sheet 'Sheet1' for further analysis
+df = data['Sheet1']
+
+# Step 2.1: Data Normalization
+# Convert city names to numeric codes for processing
+df['city'] = df['city'].astype('category').cat.codes
+
+doc.add_heading('Step 2.1: Data Normalization', level=2)
+doc.add_paragraph('Normalization is applied to numerical columns to ensure that all features are on the same scale. Negative and null values are filled with linear interpolation to avoid issues.')
+
+# Extract the numerical columns for normalization (excluding categorical columns like 'city', 'YEAR', and 'citycode')
+numerical_cols = df.select_dtypes(include=['float64', 'int64']).columns.difference(['YEAR', 'citycode', 'O3'])
+
+# Fill negative and null values with linear interpolation
+for col in numerical_cols:
+    df[col] = df[col].replace(0, np.nan)  # Replace 0 with NaN to handle transformation
+    df[col] = df[col].interpolate(method='linear', limit_direction='both')
+    df[col] = df[col].apply(lambda x: np.nan if x <= 0 else x)  # Set negative values to NaN
+    df[col] = df[col].fillna(df[col].mean())  # Fill NaN values with column mean
+
+# Normalize the numerical data
+scaler = StandardScaler()
+normalized_data = scaler.fit_transform(df[numerical_cols])
+
+# Create a new DataFrame with the normalized data
+df_normalized = pd.DataFrame(normalized_data, columns=numerical_cols)
+
+# Add back the categorical columns (city, citycode, and YEAR)
+df_normalized['citycode'] = df['citycode']
+df_normalized['YEAR'] = df['YEAR']
+df_normalized['city'] = df['city']
+df_normalized['O3'] = df['O3']
+
+# Set 'citycode' and 'YEAR' as a MultiIndex for panel data format
+df_normalized.set_index(['citycode', 'YEAR'], inplace=True)
+doc.add_paragraph('Normalization complete. The categorical columns are added back to the dataset for further analysis.')
+
+# Save the normalized data to an Excel file
+normalized_output_path = os.path.join(r'D:\7019\report\2', 'normalized_data.xlsx')
+df_normalized.reset_index().to_excel(normalized_output_path, index=False)
+print(f"Normalized data saved to: {normalized_output_path}")
+
+# Step 2.2: Correlation Analysis
+doc.add_heading('Step 2.2: Correlation Analysis', level=2)
+doc.add_paragraph('A correlation matrix is computed to identify highly correlated features (correlation > 0.95). The correlation coefficients and p-values are saved to an Excel file for reference.')
+
+# Calculate correlation matrix and p-values
+corr_matrix = df_normalized.corr()
+p_values = pd.DataFrame(np.zeros(corr_matrix.shape), columns=corr_matrix.columns, index=corr_matrix.index)
+
+for row in corr_matrix.columns:
+    for col in corr_matrix.columns:
+        if row != col:
+            _, p = pearsonr(df_normalized[row], df_normalized[col])
+            p_values.loc[row, col] = p
+
+# Save correlation coefficients and p-values to Excel
+correlation_output_path = os.path.join(r'D:\7019\report\2', 'correlation_analysis.xlsx')
+with pd.ExcelWriter(correlation_output_path) as writer:
+    corr_matrix.to_excel(writer, sheet_name='Correlation Coefficients')
+    p_values.to_excel(writer, sheet_name='P-values')
+print(f"Correlation analysis saved to: {correlation_output_path}")
+
+# Documenting the correlation analysis in Word
+doc.add_paragraph('The correlation coefficients and p-values are saved in the file correlation_analysis.xlsx. Features with correlation > 0.95 are considered highly correlated and may be removed to reduce multicollinearity.')
+
+# Remove highly correlated features (correlation > 0.95)
+upper_triangle = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+high_corr_features = [column for column in upper_triangle.columns if any(upper_triangle[column] > 0.95)]
+X = df_normalized.drop(columns=high_corr_features)
+removed_features = high_corr_features.copy()
+
+# Save removed and retained features with correlation coefficients and p-values
+removed_features_corr = []
+for col in removed_features:
+    max_corr_index = upper_triangle.loc[:, col].idxmax()
+    removed_features_corr.append({
+        'Feature': col,
+        'Correlation Coefficient': corr_matrix.loc[col, max_corr_index],
+        'P-value': p_values.loc[col, max_corr_index]
+    })
+removed_features_corr_df = pd.DataFrame(removed_features_corr)
+
+remaining_features_corr = corr_matrix.loc[X.columns, X.columns]
+remaining_features_pvals = p_values.loc[X.columns, X.columns]
+
+correlation_details_output_path = os.path.join(r'D:\7019\report\2', 'correlation_removed_retained.xlsx')
+with pd.ExcelWriter(correlation_details_output_path) as writer:
+    removed_features_corr_df.to_excel(writer, sheet_name='Removed Features Correlation', index=False)
+    remaining_features_corr.to_excel(writer, sheet_name='Remaining Features Correlation')
+    remaining_features_pvals.to_excel(writer, sheet_name='Remaining Features P-values')
+print(f"Correlation details saved to: {correlation_details_output_path}")
+
+# Iteratively remove features with high VIF to avoid divide by zero issues
+doc.add_heading('Step 2.3: Multicollinearity Diagnosis using VIF', level=2)
+doc.add_paragraph('Variance Inflation Factor (VIF) is calculated to diagnose multicollinearity among the features. Features with VIF greater than 100 are removed to ensure model stability.')
+
+max_vif = 100
+iteration_limit = 20  # Set a limit for the number of iterations to avoid infinite loops
+iteration_count = 0
+vif_removed_features = []
+vif_remaining_features = []
+
+while iteration_count < iteration_limit:
+    vif_info = pd.DataFrame()
+    try:
+        vif_info['VIF'] = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+        vif_info['Column'] = X.columns
+        max_vif_value = vif_info['VIF'].max()
+        
+        if max_vif_value > max_vif or np.isinf(max_vif_value):
+            feature_to_remove = vif_info.loc[vif_info['VIF'].idxmax(), 'Column']
+            print(f"Removing feature {feature_to_remove} with VIF: {max_vif_value}")
+            vif_removed_features.append({'Feature': feature_to_remove, 'VIF': max_vif_value})
+            X = X.drop(columns=[feature_to_remove])
+        else:
+            vif_remaining_features = vif_info.to_dict('records')
+            break
+        iteration_count += 1
+    except (np.linalg.LinAlgError, ValueError):
+        print("LinAlgError or ValueError encountered during VIF calculation. Adjusting features to mitigate multicollinearity.")
+        break
+
+# Save VIF information for removed and retained features
+vif_removed_df = pd.DataFrame(vif_removed_features)
+vif_remaining_df = pd.DataFrame(vif_remaining_features)
+
+vif_details_output_path = os.path.join(r'D:\7019\report\2', 'vif_removed_retained.xlsx')
+with pd.ExcelWriter(vif_details_output_path) as writer:
+    vif_removed_df.to_excel(writer, sheet_name='Removed Features VIF', index=False)
+    vif_remaining_df.to_excel(writer, sheet_name='Remaining Features VIF', index=False)
+print(f"VIF details saved to: {vif_details_output_path}")
+
+# Save filtered dataset for next step analysis
+filtered_data_output_path = os.path.join(r'D:\7019\report\2', 'filtered_dataset.xlsx')
+filtered_data = df_normalized[X.columns.tolist() + ['O3']].loc[:, ~df_normalized[X.columns.tolist() + ['O3']].columns.duplicated()]  # Remove duplicated 'O3' column
+filtered_data.reset_index().to_excel(filtered_data_output_path, index=False)
+print(f"Filtered dataset saved to: {filtered_data_output_path}")
+
+# Documenting the removed features
+doc.add_heading('Removed Features due to High VIF and High Correlation', level=2)
+doc.add_paragraph('The following features were removed due to high VIF values (greater than 100) or high correlation (correlation > 0.95) to reduce multicollinearity:')
+doc.add_paragraph(', '.join(removed_features + [f['Feature'] for f in vif_removed_features]))
+
+# Checking for negative values in the final dataset
+doc.add_heading('Negative Value Check', level=2)
+negative_values = (filtered_data < 0).any()
+if negative_values.any():
+    doc.add_paragraph('Warning: The following columns contain negative values, which may affect subsequent panel analysis:')
+    for col in negative_values.index:
+        if negative_values[col]:
+            min_value = filtered_data[col].min()
+            doc.add_paragraph(f'Column: {col}, Minimum Value: {min_value}')
+    doc.add_paragraph('Consider applying additional transformations or handling negative values before further analysis.')
+else:
+    doc.add_paragraph('No negative values were found in the final dataset.')
+
+# Save the Word document
+doc_output_path = os.path.join(r'D:\7019\report\2', 'data_analysis_report.docx')
+doc.save(doc_output_path)
+print(f"Data analysis report saved to: {doc_output_path}")
